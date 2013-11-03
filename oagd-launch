@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+
+import sqlite3
+from binascii import unhexlify
+import zlib
+import json
+import sys
+import hashlib
+import pickle
+import os
+import tempfile
+import subprocess
+#import pdb
+
+
+def get_basedir():
+    if os.path.isdir(str(os.environ.get('FS_UAE_BASE_DIR'))):
+        return os.environ['FS_UAE_BASE_DIR']
+    basedirconf = os.path.expanduser('~/.config/fs-uae/base-dir')
+    if os.path.isfile(basedirconf):
+        with open(basedirconf) as f:
+            path = f.readline().strip()
+        if os.path.isdir(path):
+            return path
+    basedirconf = os.path.expanduser('~/.config/fs-uae/fs-uae.conf')
+    if os.path.isfile(basedirconf):
+        with open(basedirconf) as f:
+            for line in f:
+                if line.split('=')[0].strip() == 'base_dir':
+                    path = line.split('=')[1].strip()
+                    if os.path.isdir(path):
+                        return path
+    try:
+        docdir = subprocess.check_output(
+            ['xdg-user-dir', 'DOCUMENTS']).decode().strip(os.linesep)
+        path = os.path.join(docdir, 'FS-UAE')
+        if os.path.isdir(path):
+            return path
+    except:
+        path = os.path.join(os.path.expanduser('~/FS-UAE'))
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def dohash(hfile):
+    with open(hfile, 'rb') as f:
+        data = f.read()
+        return hashlib.sha1(data).hexdigest()
+
+
+def get_config_from_game_id(game_id):
+    conn = sqlite3.connect(db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT data FROM game WHERE id = ?", (game_id,))
+    data = zlib.decompress(cursor.fetchone()[0])
+    doc = json.loads(data.decode())
+    next_parent_uuid = doc.get("parent_uuid", "")
+    while next_parent_uuid:
+        cursor.execute(
+            "SELECT data FROM game WHERE uuid = ?",
+            (sqlite3.Binary(
+                unhexlify(next_parent_uuid.replace("-", ""))),))
+        data = zlib.decompress(cursor.fetchone()[0])
+        next_doc = json.loads(data.decode())
+        next_parent_uuid = next_doc.get("parent_uuid", "")
+        next_doc.update(doc)
+        doc = next_doc
+    cursor.close()
+    conn.close()
+    return doc
+
+
+def get_variant_list_from_sha1(sha1_from_file):
+    conn = sqlite3.connect(db)
+    cursor = conn.cursor()
+    cursor.execute("select data,id from game")
+    variant_list = []
+    while True:
+        fetched = cursor.fetchone()
+        if not fetched:
+            break
+        data = zlib.decompress(fetched[0])
+        game_id = fetched[1]
+        doc = json.loads(data.decode())
+        if sha1_from_file in doc.get('floppy_list', ()):
+            variant_list.append(game_id)
+    cursor.close()
+    conn.close()
+    return variant_list
+
+
+def get_hashdict(filename):
+    fpath = os.path.dirname(os.path.realpath(filename))
+    mtime = str(os.stat(fpath).st_mtime)
+    tmpdir = tempfile.gettempdir()
+    cachefile = os.path.join(tmpdir, mtime + '.oagdl')
+    if os.path.isfile(cachefile):
+        print('Using file cache for {0}'.format(fpath))
+        with open(cachefile, 'rb') as f:
+            image_dict = pickle.load(f)
+        return image_dict
+    print('Checksumming disk images in {0} ... '.format(fpath), end='')
+    all_files = os.listdir(fpath)
+    fexts = ('.adf', '.dms', '.adz', '.ipf')
+    image_dict = {}
+    for image in all_files:
+        if image.lower().endswith(fexts):
+            image_fullpath = os.path.join(fpath, image)
+            sha1 = dohash(image_fullpath)
+            image_dict[sha1] = image_fullpath
+    print('Done.')
+    if len(image_dict) > 9:
+        print('Writing cache.')
+        with open(cachefile, 'wb') as f:
+            pickle.dump(image_dict, f)
+    return image_dict
+
+
+def test_variant_match(variant, hashdict):
+    floppy_list = []
+    gameconfig = get_config_from_game_id(variant)
+    print('\nChecking variant \"{0}\":'.format(gameconfig['variant_name']))
+    file_list = eval(gameconfig['file_list'])
+    for floppy in file_list:
+        #print('')
+        print(floppy['name'])
+        for file_sha1 in hashdict:
+            if floppy.get('sha1') == file_sha1:
+                hashed_file = hashdict.get(file_sha1)
+                print('    --> MATCHES: ', end='')
+                print(os.path.basename(hashed_file))
+                floppy_list.append(hashed_file)
+    disk_diff = len(file_list) - len(floppy_list)
+    if disk_diff == 0:
+        print('Found all disk images.')
+        return floppy_list, gameconfig
+    else:
+        print(
+            'There are {0} missing disks for this variant.'.format(disk_diff))
+        return None, None
+
+
+try:
+    cmdline_file = sys.argv[1]
+except IndexError:
+    print('{0} - a command line fs-uae launcher powered by the OAGD'.format(
+        sys.argv[0]))
+    print('Usage: {0} <diskimage>'.format(sys.argv[0]))
+    quit()
+
+if not os.path.isfile(cmdline_file):
+    sys.stderr.write('File not found: {0}\n'.format(cmdline_file))
+    quit(1)
+
+basedir = get_basedir()
+if not basedir:
+    sys.stderr.write('Could not find fs-uae base dir.\n')
+    quit(1)
+
+global db
+db = os.path.join(basedir, 'Data', 'Game Database.sqlite')
+if not os.path.isfile(db):
+    sys.stderr.write('Could not find local game database.\n')
+    quit(1)
+
+print('Checksumming file... ', end='')
+cmdline_sha1 = dohash(cmdline_file)
+print('Done.')
+
+print('Looking up the database.')
+variant_list = get_variant_list_from_sha1(cmdline_sha1)
+if not variant_list:
+    print('{0} was not found in the database.'.format(cmdline_file))
+    quit()
+print('Found {0} possible variant(s) for {1}.'.format(
+    len(variant_list), os.path.basename(cmdline_file)))
+
+hashdict = get_hashdict(cmdline_file)
+
+for variant in variant_list:
+    floppy_list, gameconfig = test_variant_match(variant, hashdict)
+    if floppy_list:
+        break
+
+if not floppy_list:
+    print('\nCan\'t start fs-uae: missing disk image(s).')
+    quit()
+
+if not gameconfig.get('amiga_model'):
+    kickstart = gameconfig.get('kickstart', '')
+    chipset = gameconfig.get('chipset', '')
+    if kickstart == '1.2':
+        gameconfig['amiga_model'] = 'A1000'
+    elif kickstart.startswith('2.') or chipset == 'ECS':
+        gameconfig['amiga_model'] = 'A600'
+    elif kickstart.startswith('3.') or chipset == 'AGA':
+        gameconfig['amiga_model'] = 'A1200'
+
+gameconfig['save_states'] = '0'
+
+print('\nWriting fs-uae config file... ', end='')
+fsuaeconf = tempfile.NamedTemporaryFile(
+    mode='w', buffering=1, encoding='utf-8', suffix='.fs-uae', prefix='CONF')
+fsuaeconf.write('[fs-uae]\n')
+
+for option in gameconfig:
+    fsuaeconf.write('{0} = {1}\n'.format(option, gameconfig[option]))
+
+try:
+    fsuaeconf.write('floppy_drive_0 = {0}\n'.format(floppy_list[0]))
+    fsuaeconf.write('floppy_drive_1 = {0}\n'.format(floppy_list[1]))
+    fsuaeconf.write('floppy_drive_2 = {0}\n'.format(floppy_list[2]))
+    fsuaeconf.write('floppy_drive_3 = {0}\n'.format(floppy_list[3]))
+except IndexError:
+    pass
+
+diskcount = 0
+for floppy in floppy_list:
+    fsuaeconf.write('floppy_image_{0} = {1}\n'.format(diskcount, floppy))
+    diskcount += 1
+
+print('Done.')
+
+print('Launching fs-uae...')
+with open(os.devnull, 'wb') as devnull:
+    proc = subprocess.Popen(['fs-uae', fsuaeconf.name], stdout=devnull)
+    proc.wait()
