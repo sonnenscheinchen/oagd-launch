@@ -192,10 +192,14 @@ if not gameconfig.get('amiga_model'):
     chipset = gameconfig.get('chipset', '')
     if kickstart == '1.2':
         gameconfig['amiga_model'] = 'A1000'
-    elif kickstart.startswith('2.') or chipset == 'ECS':
+    elif kickstart.startswith('2.') or chipset.upper() == 'ECS':
         gameconfig['amiga_model'] = 'A600'
-    elif kickstart.startswith('3.') or chipset == 'AGA':
+    elif kickstart.startswith('3.') or chipset.upper() == 'AGA':
         gameconfig['amiga_model'] = 'A1200'
+
+if int(gameconfig.get('fast_memory', '0')) > 8192:
+    gameconfig['amiga_model'] = 'A1200/020'
+    gameconfig['zorro_iii_memory'] = gameconfig.get('fast_memory')
 
 gameconfig['save_states'] = '0'
 
@@ -219,7 +223,6 @@ diskcount = 0
 for floppy in floppy_list:
     fsuaeconf.write('floppy_image_{0} = {1}\n'.format(diskcount, floppy))
     diskcount += 1
-
 print('Done.')
 
 print('Launching fs-uae...')
