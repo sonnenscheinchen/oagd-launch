@@ -52,7 +52,7 @@ def dohash(hfile):
 def get_config_from_game_id(game_id):
     conn = sqlite3.connect(db)
     cursor = conn.cursor()
-    cursor.execute("SELECT data FROM game WHERE id = ?", (game_id,))
+    cursor.execute("SELECT data FROM game WHERE id = ? AND data != ''", (game_id,))
     data = zlib.decompress(cursor.fetchone()[0])
     doc = json.loads(data.decode())
     next_parent_uuid = doc.get("parent_uuid", "")
@@ -74,7 +74,7 @@ def get_config_from_game_id(game_id):
 def get_variant_list_from_sha1(sha1_from_file):
     conn = sqlite3.connect(db)
     cursor = conn.cursor()
-    cursor.execute("select data,id from game")
+    cursor.execute("SELECT data,id FROM game WHERE data != ''")
     variant_list = []
     while True:
         fetched = cursor.fetchone()
@@ -100,7 +100,7 @@ def get_hashdict(filename):
         with open(cachefile, 'rb') as f:
             image_dict = pickle.load(f)
         return image_dict
-    print('Checksumming disk images in {0} ... '.format(fpath), end='')
+    print('\nChecksumming disk images in {0} ... '.format(fpath), end='')
     all_files = os.listdir(fpath)
     fexts = ('.adf', '.dms', '.adz', '.ipf')
     image_dict = {}
@@ -159,7 +159,7 @@ if not basedir:
     quit(1)
 
 global db
-db = os.path.join(basedir, 'Data', 'Game Database.sqlite')
+db = os.path.join(basedir, 'Cache', 'oagd.net.sqlite')
 if not os.path.isfile(db):
     sys.stderr.write('Could not find local game database.\n')
     quit(1)
